@@ -5,8 +5,12 @@
 #include "soc/rtc_cntl_reg.h"
 #include "Base64.h"
 #include "esp_camera.h"
+#include "SD_MMC.h" // Thêm thư viện SD card
+#include "time.h"   // Thêm thư viện thời gian để đặt tên file
 //======================================== 
-
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 25200;  // GMT+7 (Vietnam time: 7*3600)
+const int daylightOffset_sec = 0;
 //======================================== CAMERA_MODEL_AI_THINKER GPIO.
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -79,7 +83,122 @@ void Test_Con() {
     delay(1000);
   }
 }
+
+
+//=====================Hàm khởi tạo thời gian =========================
+void initTime() {
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  
+  struct tm timeinfo;
+  int retry = 0;
+  while(!getLocalTime(&timeinfo) && retry < 5) {
+    Serial.println("Failed to obtain time, retrying...");
+    delay(1000);
+    retry++;
+  }
+  
+  if (retry >= 5) {
+    Serial.println("Could not get time from NTP. Check your internet connection.");
+  } else {
+    Serial.println("Time synchronized successfully");
+  }
+}
+
 //________________________________________________________________________________ 
+//=======================SD Card=========================================
+String getFileName() {
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return String("photo_") + String(millis()) + ".jpg";
+  }
+  char timeStringBuff[50];
+  strftime(timeStringBuff, sizeof(timeStringBuff), "%Y%m%d_%H%M%S", &timeinfo);
+  return String("/photo_") + String(timeStringBuff) + ".jpg";
+}
+
+//=======================init SDCard Function==============================
+
+esp_err_t res = ESP_OK;
+// Function to initialize SD Card
+static esp_err_t init_sdcard() {
+  // Khởi tạo với one-bit mode
+  if (!SD_MMC.begin("/sdcard", true)) {
+    Serial.println("Failed to mount SD card VFAT filesystem.");
+    Serial.println("Please check if:");
+    Serial.println("1. SD Card is properly inserted");
+    Serial.println("2. SD Card pins are properly connected");
+    return ESP_FAIL;
+  }
+
+  uint8_t cardType = SD_MMC.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card attached");
+    return ESP_FAIL;
+  }
+
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC) {
+    Serial.println("MMC");
+  } else if (cardType == CARD_SD) {
+    Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC) {
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+
+  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+  
+  // Thử tạo một file test để kiểm tra quyền ghi
+  File testFile = SD_MMC.open("/test.txt", FILE_WRITE);
+  if (!testFile) {
+    Serial.println("Failed to create test file - Check SD card write permissions");
+    return ESP_FAIL;
+  }
+  testFile.close();
+  SD_MMC.remove("/test.txt");
+  
+  return ESP_OK;
+}
+
+//==========================end initSDCard===========================
+
+
+
+//================ Function to save photo to SD Card===========
+bool savePhotoToSD(camera_fb_t * fb) {
+  String path = getFileName();
+  Serial.printf("Picture file name: %s\n", path.c_str());
+  
+  File file = SD_MMC.open(path.c_str(), FILE_WRITE);
+  if(!file) {
+    Serial.println("Failed to open file in writing mode");
+    // Thử tạo thư mục nếu chưa tồn tại
+    if(!SD_MMC.mkdir("/photos")) {
+      Serial.println("Failed to create photos directory");
+      return false;
+    }
+    // Thử mở file lại
+    file = SD_MMC.open(path.c_str(), FILE_WRITE);
+    if(!file) {
+      return false;
+    }
+  }
+  
+  size_t written = file.write(fb->buf, fb->len);
+  file.close();
+  
+  if(written != fb->len) {
+    Serial.println("Failed to write complete file");
+    return false;
+  }
+  
+  Serial.printf("Saved file: %s, size: %u bytes\n", path.c_str(), fb->len);
+  return true;
+}
+//====================end Save photo to SDCard=========================
 
 //________________________________________________________________________________ SendCapturedPhotos()
 // Subroutine for capturing and sending photos to Google Drive.
@@ -138,7 +257,14 @@ void SendCapturedPhotos() {
     if (LED_Flash_ON == true) digitalWrite(FLASH_LED_PIN, LOW);
     
     Serial.println("Taking a photo was successful.");
-    //.............................. 
+
+    //===================================
+    // Save to SD Card
+    if(savePhotoToSD(fb)) {
+      Serial.println("Saved photo to SD Card successfully");
+    } else {
+      Serial.println("Failed to save photo to SD Card");
+    }
 
     //.............................. Sending image to Google Drive.
     Serial.println();
@@ -229,8 +355,6 @@ void SendCapturedPhotos() {
 
 //________________________________________________________________________________ VOID SETUP()
 void setup() {
-  // put your setup code here, to run once:
-  
   // Disable brownout detector.
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   
@@ -249,8 +373,23 @@ void setup() {
   Serial.println();
   Serial.print("Connecting to : ");
   Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  
+  WiFi.begin(ssid, password);  
+  Serial.println("============================");
+  Serial.println("Initializing time...");
+  initTime();
+  // SD camera init
+  Serial.println("Mounting the SD card ...");
+  esp_err_t card_err = init_sdcard();
+  if (card_err != ESP_OK) {
+    Serial.printf("SD Card init failed with error 0x%x", card_err);
+    return;
+  }
+
+  Serial.println("Initializing SD Card...");
+  if (init_sdcard() != ESP_OK) {
+    Serial.println("SD Card initialization failed! - - - - -- Failed  - - - Failed");
+    // ESP.restart();
+  }
   // The process timeout of connecting ESP32 CAM with WiFi Hotspot / WiFi Router is 20 seconds.
   // If within 20 seconds the ESP32 CAM has not been successfully connected to WiFi, the ESP32 CAM will restart.
   // I made this condition because on my ESP32-CAM, there are times when it seems like it can't connect to WiFi, so it needs to be restarted to be able to connect to WiFi.

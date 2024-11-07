@@ -11,7 +11,3 @@ Upload an image directly from ESP32-CAM to Google Drive
 - One the esp32cam-gdrive.ino put the credentials of your wireless network.
 
 
-## Want to know more?
-
-I wrote an article in my [blog](http://www.gsampallo.com/blog/2019/10/13/esp32-cam-subir-fotos-a-google-drive/)
-                                 
